@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Stewart Toroid — Animated Construction</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='6' fill='%23a855f7'/></svg>">
+<style>
+  html,body{margin:0;height:100%;background:#0b0f14;color:#e6edf3;font-family:system-ui,Segoe UI,Roboto,sans-serif;overflow:hidden}
+  #app{position:fixed;inset:0}
+  #ui{position:fixed;left:12px;top:12px;background:rgba(15,20,28,.78);padding:12px 14px;border-radius:10px;
+       backdrop-filter:blur(6px);border:1px solid #243042;min-width:260px;font-size:13px;line-height:1.5}
+  #stage{font-weight:600;font-size:14px;margin-bottom:8px;color:#7dd3fc}
+  #sub{font-size:12px;color:#9aa7b5;margin-bottom:10px}
+  .row{display:flex;align-items:center;gap:8px;margin:6px 0}
+  label{font-size:12px;color:#9aa7b5;width:78px}
+  input[type=range]{flex:1;accent-color:#7dd3fc}
+  #spd{width:42px;text-align:right;font-variant-numeric:tabular-nums;color:#cbd5e1}
+  button{margin-top:8px;background:#1f2937;color:#e6edf3;border:1px solid #334155;border-radius:7px;
+         padding:7px 12px;cursor:pointer;font-size:12px}
+  button:hover{background:#283446}
+  .leg{margin-top:10px;font-size:11px;color:#9aa7b5}
+  .leg span{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:middle}
+  #hint{position:fixed;right:12px;bottom:12px;font-size:11px;color:#5b6776}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="ui">
+  <div id="stage">Stewart Toroid</div>
+  <div id="sub">Animating construction…</div>
+  <div class="row"><label>Spin speed</label>
+    <input id="spin" type="range" min="0" max="2" step="0.01" value="0.5">
+    <span id="spd">0.50</span>
+  </div>
+  <div class="row"><label>Timeline</label>
+    <input id="tl" type="range" min="0" max="1000" step="1" value="0">
+    <button id="play" style="width:54px;margin-top:0">▶</button>
+  </div>
+  <button id="replay">↺ Replay</button>
+  <button id="color" disabled>🎨 Random proper coloring</button>
+  <button id="uncolor" disabled>✕ Clear</button>
+  <div id="cstat" style="margin-top:6px;font-size:11px;color:#9aa7b5"></div>
+  <div class="leg"><span style="background:#3b82f6"></span>J4′ cupola<br>
+    <span style="background:#22c55e"></span>Cube tube Cy<br>
+    <span style="background:#06b6d4"></span>J4′₂ cupola<br>
+    <span style="background:#a855f7"></span>Truncated cube Tc</div>
+</div>
+<div id="hint">Drag to orbit · Scroll to zoom</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+const P=(x,y,z)=>[x,y,z];
+const H=Math.SQRT1_2, SQ2=Math.SQRT2, L=1+SQ2;            // cupola height, sqrt2, Tc cube edge
+const R=1/(2*Math.sin(Math.PI/8));                        // octagon circumradius (edge 1)
+const HL=L/2;
+
+function octXY(){const v=[];for(let k=0;k<8;k++){const a=Math.PI/8+k*Math.PI/4;v.push([R*Math.cos(a),R*Math.sin(a)]);}return v;}
+const sqXY=[[0.5,0.5],[-0.5,0.5],[-0.5,-0.5],[0.5,-0.5]];
+// Tc side-octagon vertex pattern (in the two free axes): square of side L with corners cut
+const OF=[[0.5,HL],[HL,0.5],[HL,-0.5],[0.5,-HL],[-0.5,-HL],[-HL,-0.5],[-HL,0.5],[-0.5,HL]];
+
+function faceN(a,b,c){
+  const ux=b[0]-a[0],uy=b[1]-a[1],uz=b[2]-a[2],vx=c[0]-a[0],vy=c[1]-a[1],vz=c[2]-a[2];
+  let nx=uy*vz-uz*vy,ny=uz*vx-ux*vz,nz=ux*vy-uy*vx;const l=Math.hypot(nx,ny,nz)||1;
+  return [nx/l,ny/l,nz/l];
+}
+function geomFromFaces(faces){
+  const pos=[],nrm=[];
+  for(const f of faces)for(let i=1;i<f.length-1;i++){
+    const a=f[0],b=f[i],c=f[i+1],n=faceN(a,b,c);
+    for(const p of [a,b,c]){pos.push(p[0],p[1],p[2]);nrm.push(n[0],n[1],n[2]);}
+  }
+  const g=new THREE.BufferGeometry();
+  g.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));
+  g.setAttribute('normal',new THREE.Float32BufferAttribute(nrm,3));
+  return g;
+}
+
+const g={coloringOn:false};
+
+class Piece{
+  constructor(faces,color,detach){
+    const g=geomFromFaces(faces);
+    this.mat=new THREE.MeshStandardMaterial({color,side:THREE.DoubleSide,transparent:true,opacity:0,
+      flatShading:true,roughness:0.62,metalness:0.06});
+    this.mesh=new THREE.Mesh(g,this.mat);
+    const eg=new THREE.EdgesGeometry(g,1);
+    this.lmat=new THREE.LineBasicMaterial({color:0x05080c,transparent:true,opacity:0});
+    this.edges=new THREE.LineSegments(eg,this.lmat);
+    this.group=new THREE.Group();this.group.add(this.mesh,this.edges);
+    this.opacity=0;this.target=0;
+    this.detach=detach?detach.slice():null;
+    this.toroid=false; // part of final assembled toroid surface
+    this.baseZ=0;      // per-piece z offset (hover/drop), set by timeline
+  }
+  update(dt){
+    this.opacity+=(this.target-this.opacity)*Math.min(1,dt*5.5);
+    let fo=this.opacity;
+    if(g.coloringOn&&this.toroid) fo=0; // hide fills, keep edges, while coloring
+    this.mat.opacity=fo;this.lmat.opacity=this.opacity*0.6;
+    this.group.visible=this.opacity>0.01;
+    if(this.detach){const d=(1-this.opacity)*0.7;this.group.position.set(this.detach[0]*d,this.detach[1]*d,this.detach[2]*d);}
+  }
+}
+
+/* ---------- build geometry ---------- */
+// First cupola J4': octagon at z0 (bottom), square at z0+H (top)
+const z0=-HL;
+const o1=octXY().map(p=>P(p[0],p[1],z0));
+const s1=sqXY.map(p=>P(p[0],p[1],z0+H));
+const cup1Faces=[
+  [o1[0],o1[1],s1[0]],[o1[2],o1[3],s1[1]],[o1[4],o1[5],s1[2]],[o1[6],o1[7],s1[3]],
+  [o1[1],o1[2],s1[1],s1[0]],[o1[3],o1[4],s1[2],s1[1]],[o1[5],o1[6],s1[3],s1[2]],[o1[7],o1[0],s1[0],s1[3]]
+];
+const cup1TopSq=[s1[0],s1[1],s1[2],s1[3]];
+const cup1BotOct=[o1[0],o1[1],o1[2],o1[3],o1[4],o1[5],o1[6],o1[7]];
+
+// Cube tube Cy: z1 -> z2
+const z1=z0+H, z2=z1+1;
+const p=sqXY.map(q=>P(q[0],q[1],z1));
+const q=sqXY.map(c=>P(c[0],c[1],z2));
+const cubeFaces=[
+  [p[0],p[1],q[1],q[0]],[p[1],p[2],q[2],q[1]],[p[2],p[3],q[3],q[2]],[p[3],p[0],q[0],q[3]]
+];
+const cubeBotSq=[p[0],p[1],p[2],p[3]];
+const cubeTopSq=[q[0],q[1],q[2],q[3]];
+
+// Second cupola J4'_2 (flipped): octagon at z3 (top), square at z2 (bottom)
+const z3=HL;
+const o2=octXY().map(pp=>P(pp[0],pp[1],z3));
+const s2=sqXY.map(pp=>P(pp[0],pp[1],z2));
+const cup2Faces=[
+  [o2[0],o2[1],s2[0]],[o2[2],o2[3],s2[1]],[o2[4],o2[5],s2[2]],[o2[6],o2[7],s2[3]],
+  [o2[1],o2[2],s2[1],s2[0]],[o2[3],o2[4],s2[2],s2[1]],[o2[5],o2[6],s2[3],s2[2]],[o2[7],o2[0],s2[0],s2[3]]
+];
+const cup2BotSq=[s2[0],s2[1],s2[2],s2[3]];
+const cup2TopOct=[o2[0],o2[1],o2[2],o2[3],o2[4],o2[5],o2[6],o2[7]];
+
+// Truncated-cube tube: 4 side octagons + 8 corner triangles (top/bottom octagons removed)
+const tcFaces=[];
+tcFaces.push(OF.map(v=>P( HL,v[0],v[1])));   // x = +HL
+tcFaces.push(OF.map(v=>P(-HL,v[0],v[1])));   // x = -HL
+tcFaces.push(OF.map(v=>P(v[0], HL,v[1])));   // y = +HL
+tcFaces.push(OF.map(v=>P(v[0],-HL,v[1])));   // y = -HL
+for(const sx of [1,-1])for(const sy of [1,-1])for(const sz of [1,-1])
+  tcFaces.push([P(sx*0.5,sy*HL,sz*HL),P(sx*HL,sy*0.5,sz*HL),P(sx*HL,sy*HL,sz*0.5)]);
+const tcTopOct=OF.map(v=>P(v[0],v[1], HL));
+const tcBotOct=OF.map(v=>P(v[0],v[1],-HL));
+
+/* ---------- pieces ---------- */
+const Z=[0,0,1],Zm=[0,0,-1];
+const cup1Band =new Piece(cup1Faces ,0x3b82f6); cup1Band.toroid=true;
+const cup1CapT =new Piece([cup1TopSq],0x93c5fd,Z );
+const cup1CapB =new Piece([cup1BotOct],0x93c5fd,Zm);
+const cubeTube =new Piece(cubeFaces ,0x22c55e); cubeTube.toroid=true;
+const cubeCapT =new Piece([cubeTopSq],0x86efac,Z );
+const cubeCapB =new Piece([cubeBotSq],0x86efac,Zm);
+const cup2Band =new Piece(cup2Faces ,0x06b6d4); cup2Band.toroid=true;
+const cup2CapB =new Piece([cup2BotSq],0x67e8f9,Zm);
+const cup2CapT =new Piece([cup2TopOct],0x67e8f9,Z );
+const tcTube   =new Piece(tcFaces   ,0xa855f7); tcTube.toroid=true;
+const tcCapT   =new Piece([tcTopOct],0xd8b4fe);   // fade in place (coplanar w/ cupola rim)
+const tcCapB   =new Piece([tcBotOct],0xd8b4fe);
+const allPieces=[cup1Band,cup1CapT,cup1CapB,cubeTube,cubeCapT,cubeCapB,cup2Band,cup2CapB,cup2CapT,tcTube,tcCapT,tcCapB];
+
+/* ---------- proper face coloring of final toroid ---------- */
+const palette=[0xef4444,0xf59e0b,0xeab308,0x22c55e,0x14b8a6,0x3b82f6,0x8b5cf6,0xec4899];
+const toroidFaces=[...cup1Faces,...cubeFaces,...cup2Faces,...tcFaces];
+function vkey(p){return p[0].toFixed(4)+','+p[1].toFixed(4)+','+p[2].toFixed(4);}
+function ekey(a,b){const ka=vkey(a),kb=vkey(b);return ka<kb?ka+'|'+kb:kb+'|'+ka;}
+const edgeMap=new Map();
+toroidFaces.forEach((f,fi)=>{for(let i=0;i<f.length;i++){const k=ekey(f[i],f[(i+1)%f.length]);
+  if(!edgeMap.has(k))edgeMap.set(k,[]);edgeMap.get(k).push(fi);}});
+const adj=toroidFaces.map(()=>new Set());
+edgeMap.forEach(L=>{for(let i=0;i<L.length;i++)for(let j=i+1;j<L.length;j++){adj[L[i]].add(L[j]);adj[L[j]].add(L[i]);}});
+function shuffle(a){for(let i=a.length-1;i>0;i--){const j=(Math.random()*(i+1))|0;[a[i],a[j]]=[a[j],a[i]];}}
+let coloredMesh=null,coloredOpacity=0;
+function recolor(){
+  const order=toroidFaces.map((_,i)=>i);shuffle(order);
+  const palIdx=palette.map((_,i)=>i);shuffle(palIdx);
+  const cols=new Array(toroidFaces.length);
+  for(const fi of order){const used=new Set();adj[fi].forEach(j=>{if(cols[j]!=null)used.add(cols[j]);});
+    let chosen=null;
+    for(const id of palIdx)if(!used.has(id)){chosen=id;break;}
+    if(chosen===null){let h=0;while(used.has(1000+h))h++;chosen=1000+h;}
+    cols[fi]=chosen;}
+  const usedSet=new Set(cols);const ncol=usedSet.size;
+  const palCols=palette.map(hex=>new THREE.Color(hex));
+  const pos=[],col=[];
+  for(let fi=0;fi<toroidFaces.length;fi++){const f=toroidFaces[fi];
+    let c;if(cols[fi]<1000)c=palCols[cols[fi]];else{c=new THREE.Color().setHSL((cols[fi]-1000)/360,0.75,0.55);}
+    for(let i=1;i<f.length-1;i++){const a=f[0],b=f[i],cc=f[i+1];
+      for(const p of [a,b,cc]){pos.push(p[0],p[1],p[2]);col.push(c.r,c.g,c.b);}}}
+  if(coloredMesh){spinGroup.remove(coloredMesh);coloredMesh.geometry.dispose();coloredMesh.material.dispose();}
+  const geom=new THREE.BufferGeometry();
+  geom.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));
+  geom.setAttribute('color',new THREE.Float32BufferAttribute(col,3));
+  geom.computeVertexNormals();
+  const mat=new THREE.MeshStandardMaterial({vertexColors:true,side:THREE.DoubleSide,flatShading:true,
+    roughness:0.6,metalness:0.05,transparent:true,opacity:0});
+  coloredMesh=new THREE.Mesh(geom,mat);spinGroup.add(coloredMesh);
+  return ncol;
+}
+
+/* ---------- scene ---------- */
+const scene=new THREE.Scene();
+scene.background=new THREE.Color(0x0b0f14);
+const camera=new THREE.PerspectiveCamera(45,innerWidth/innerHeight,0.1,100);
+camera.up.set(0,0,1);                 // assembly axis Z is vertical in the view
+camera.position.set(6.0,6.0,2.4);
+const renderer=new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(devicePixelRatio);renderer.setSize(innerWidth,innerHeight);
+document.getElementById('app').appendChild(renderer.domElement);
+const controls=new OrbitControls(camera,renderer.domElement);
+controls.target.set(0,0,0.1);controls.enableDamping=true;controls.dampingFactor=0.08;
+
+scene.add(new THREE.AmbientLight(0xffffff,0.55));
+const d1=new THREE.DirectionalLight(0xffffff,0.9);d1.position.set(6,9,7);scene.add(d1);
+const d2=new THREE.DirectionalLight(0x88aaff,0.35);d2.position.set(-6,-3,-5);scene.add(d2);
+
+const orientGroup=new THREE.Group();scene.add(orientGroup);
+const spinGroup=new THREE.Group();orientGroup.add(spinGroup);
+const innerGroup=new THREE.Group();spinGroup.add(innerGroup);     // F' assembly (lifted/dropped)
+innerGroup.add(cup1Band.group,cubeTube.group,cup2Band.group);
+const tcGroup=new THREE.Group();spinGroup.add(tcGroup);          // Tc (lowered to maintain drop gap)
+tcGroup.add(tcTube.group,tcCapT.group,tcCapB.group);
+spinGroup.add(cup1CapT.group,cup1CapB.group,cubeCapT.group,cubeCapB.group,
+              cup2CapB.group,cup2CapT.group);
+
+/* ---------- timeline-driven construction ---------- */
+// A single normalized parameter `T` in [0,1] drives everything, so the slider
+// can scrub freely. The timeline is a list of BEATS (action duration sec), each
+// followed by HOLD seconds of pause. Adjust HOLD to scale every pause uniformly.
+const HOLD=2.0;                   // seconds of pause after EACH beat (programmable)
+const BEATS=[                     // [name, actionDurationSec]
+  ['j4Show',  1.5], ['j4Remove', 1.2],   // J4 -> J4'
+  ['cubeShow',1.5], ['cubeRemove',1.2], ['cyDrop',1.5],  // cube -> Cy -> drop onto J4'
+  ['cup2Show',1.5], ['cup2Remove',1.2], ['cup2Drop',1.5], // J4_2 -> J4'_2 -> drop onto Cy
+  ['liftF',   1.1],                    // lift F' up to make room for Tc
+  ['tcShow',  1.5], ['tcRemove', 1.2], // Tc appears below; remove octagons
+  ['dropF',    3.6],                   // drop F' into Tc
+  ['tilt',    2.0]                                        // rotate hole to camera
+];
+const TOTAL=BEATS.reduce((s,b)=>s+b[1],0) + HOLD*BEATS.length;
+const TL={};{let acc=0;for(const [k,d] of BEATS){TL[k]=[acc/TOTAL,(acc+d)/TOTAL];acc+=d;TL[k+'_hold']=[acc/TOTAL,(acc+HOLD)/TOTAL];acc+=HOLD;}TL.done=1.0;}
+// earliest action start for each beat (for "has this beat begun" checks)
+const T0={};for(const [k] of BEATS){T0[k]=TL[k][0];}
+const DROP_TOP=1.80;              // F' lift offset above Tc
+const DELTA=1.20;                 // Tc lowered by same amount -> drop gap preserved
+const CY_DROP=1.4;                // hover height of Cy before dropping onto J4'
+const CUP2_DROP=1.4;              // hover height of J4'_2 before dropping onto Cy
+function span(T,a,b){const r=(T-a)/(b-a);return r<0?0:r>1?1:r;}
+function beat(T,k){return span(T,TL[k][0],TL[k][1]);}       // 0..1 progress within a beat's action
+function easeIO(x){return x<0.5?2*x*x:1-Math.pow(-2*x+2,2)/2;}
+function easeIn(x){return x*x;}
+function easeOut(x){return 1-Math.pow(1-x,3);}   // gentle settle for float-downs
+
+// labels per timeline region
+function labelFor(T){
+  if(T<T0.j4Show)         return '1 · Square cupola J4';
+  if(T<TL.j4Show[1])      return '1 · Show J4 — square cupola';
+  if(T<TL.j4Remove_hold[1])return '2 · Remove square + octagon → J4′';
+  if(T<TL.cubeShow[1])    return '3 · Show cube';
+  if(T<TL.cubeRemove_hold[1])return '4 · Remove top & bottom → Cy';
+  if(T<TL.cyDrop_hold[1]) return '5 · Drop Cy onto J4′ → funnel F';
+  if(T<TL.cup2Show[1])    return '6 · Show J4₂ — second cupola';
+  if(T<TL.cup2Remove_hold[1])return '7 · Remove square + octagon → J4′₂';
+  if(T<TL.cup2Drop_hold[1])return '8 · Drop J4′₂ onto Cy → F′';
+  if(T<TL.liftF[1])       return '9 · Lift F′ to make room for Tc';
+  if(T<TL.liftF_hold[1])  return '9 · F′ lifted — clearing space for Tc';
+  if(T<TL.tcShow[1])      return '10 · Show truncated cube Tc';
+  if(T<TL.tcRemove_hold[1])return '11 · Remove top & bottom octagons';
+  if(T<TL.dropF_hold[1])  return '12 · Drop F′ into Tc → Stewart toroid';
+  if(T<TL.tilt[1])        return '13 · Rotate hole to camera';
+  if(T<TL.tilt_hold[1]-1e-6)   return '13 · Toroid complete — pausing';
+  return '13 · Stewart toroid complete — top hole faces viewer';
+}
+
+let T=0,playing=true;             // T in [0,1]; playing drives autoplay
+let spinAngle=0;                  // accumulated spin (only after completion)
+const _idQ=new THREE.Quaternion(); // identity, for easing the final tilt
+const TL_EL=document.getElementById('tl'),PLAY_EL=document.getElementById('play');
+const labelEl=document.getElementById('stage'),subEl=document.getElementById('sub');
+
+function setPieceTarget(piece,on){piece.target=on?1:0;}
+
+// Apply full visual state for a given T. Deterministic -> scrub-safe.
+function applyT(TT){
+  // ---------- opacities (appear / remove) ----------
+  // J4 (cup1): shown at j4Show; caps removed at j4Remove.
+  cup1Band.target = TT>=T0.j4Show?1:0;
+  cup1CapT.target = (TT>=T0.j4Show && TT<T0.j4Remove)?1:0;
+  cup1CapB.target = (TT>=T0.j4Show && TT<T0.j4Remove)?1:0;
+  // Cube: shown (hovering) at cubeShow; caps removed at cubeRemove -> Cy.
+  cubeTube.target = TT>=T0.cubeShow?1:0;
+  cubeCapT.target = (TT>=T0.cubeShow && TT<T0.cubeRemove)?1:0;
+  cubeCapB.target = (TT>=T0.cubeShow && TT<T0.cubeRemove)?1:0;
+  // J4_2 (cup2): shown (hovering) at cup2Show; caps removed at cup2Remove -> J4'_2.
+  cup2Band.target = TT>=T0.cup2Show?1:0;
+  cup2CapB.target = (TT>=T0.cup2Show && TT<T0.cup2Remove)?1:0;
+  cup2CapT.target = (TT>=T0.cup2Show && TT<T0.cup2Remove)?1:0;
+  // Tc: shown at tcShow; octagons removed at tcRemove.
+  tcTube.target = TT>=T0.tcShow?1:0;
+  tcCapT.target = (TT>=T0.tcShow && TT<T0.tcRemove)?1:0;
+  tcCapB.target = (TT>=T0.tcShow && TT<T0.tcRemove)?1:0;
+
+  // ---------- per-piece hover/drop offsets (baseZ) ----------
+  // Cy hovers at CY_DROP until cyDrop, then eases to 0 (drops onto J4').
+  const cyZ = CY_DROP*(1-easeOut(beat(TT,'cyDrop')));
+  cubeTube.baseZ = cyZ; cubeCapT.baseZ = cyZ; cubeCapB.baseZ = cyZ;
+  // J4'_2 hovers at CUP2_DROP until cup2Drop, then eases to 0 (drops onto Cy).
+  const cu2Z = CUP2_DROP*(1-easeOut(beat(TT,'cup2Drop')));
+  cup2Band.baseZ = cu2Z; cup2CapB.baseZ = cu2Z; cup2CapT.baseZ = cu2Z;
+  // other pieces: no per-piece offset
+  cup1Band.baseZ=0; cup1CapT.baseZ=0; cup1CapB.baseZ=0;
+  tcTube.baseZ=0; tcCapT.baseZ=0; tcCapB.baseZ=0;
+
+  // ---------- F' lift + Tc lower (drop into Tc) ----------
+  const lp=easeIO(beat(TT,'liftF'));
+  const dp=beat(TT,'dropF');
+  let fZ,tcZ;
+  if(dp<=0){ fZ=lp*DROP_TOP; tcZ=-lp*DELTA; }                  // pre-drop: lifted / lowered
+  else { const f=easeOut(dp); fZ=(1-f)*DROP_TOP; tcZ=-(1-f)*DELTA; }  // gentle float-down
+  innerGroup.position.z=fZ;
+  tcGroup.position.z=tcZ;
+
+  // Tc transparency during drop: DISABLED (caused visual artifacts)
+  tcTube._tlOpacity=1;
+
+  // ---------- final tilt: hole axis -> camera, offset 10° ----------
+  const tilt = easeIO(beat(TT,'tilt'));
+  const camDir=new THREE.Vector3().subVectors(camera.position,controls.target).normalize();
+  const off=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,0,1),Math.PI/18);
+  const targetDir=camDir.clone().applyQuaternion(off);
+  const targetQ=new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,0,1),targetDir);
+  orientGroup.quaternion.slerpQuaternions(_idQ,targetQ,tilt);
+
+  // ---------- label + controls ----------
+  labelEl.textContent=labelFor(TT);
+  const finished=TT>=TL.done-1e-4;
+  subEl.textContent= finished?'Spin with the slider · orbit to inspect':'Animating construction…';
+  document.getElementById('color').disabled=!finished;
+}
+
+function resetAll(){T=0;playing=false;spinAngle=0;PLAY_EL.textContent='▶';
+  spinGroup.rotation.set(0,0,0);innerGroup.position.set(0,0,0);tcGroup.position.set(0,0,0);
+  orientGroup.quaternion.identity();allPieces.forEach(p=>{p.target=0;p.opacity=0;});
+  setColoring(false);applyT(0);}
+
+// --- wiring ---
+PLAY_EL.addEventListener('click',()=>{playing=!playing;PLAY_EL.textContent=playing?'⏸':'▶';
+  if(playing&&T>=TL.done)resetAll();});
+document.getElementById('replay').addEventListener('click',resetAll);
+TL_EL.addEventListener('input',()=>{playing=false;PLAY_EL.textContent='▶';T=TL_EL.value/1000;applyT(T);});
+const colorBtn=document.getElementById('color'),uncolorBtn=document.getElementById('uncolor'),cstatEl=document.getElementById('cstat');
+function setColoring(on){g.coloringOn=on;coloredOpacity=on?coloredOpacity:0;uncolorBtn.disabled=!on;
+  if(!on)cstatEl.textContent='';}
+colorBtn.addEventListener('click',()=>{const n=recolor();g.coloringOn=true;coloredOpacity=0;
+  uncolorBtn.disabled=false;cstatEl.textContent='Proper coloring: '+n+' color'+(n>1?'s':'')+' · '+toroidFaces.length+' faces';});
+uncolorBtn.addEventListener('click',()=>setColoring(false));
+const spinEl=document.getElementById('spin'),spdEl=document.getElementById('spd');
+let spinSpeed=parseFloat(spinEl.value);
+spinEl.addEventListener('input',()=>{spinSpeed=parseFloat(spinEl.value);spdEl.textContent=spinSpeed.toFixed(2);});
+spdEl.textContent=spinSpeed.toFixed(2);
+
+addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight);});
+
+/* ---------- loop ---------- */
+let last=performance.now();
+applyT(0);
+function loop(now){
+  const dt=Math.min(0.05,(now-last)/1000);last=now;
+  // advance timeline when playing
+  if(playing){T+=dt/TOTAL;if(T>=TL.done){T=TL.done;playing=false;PLAY_EL.textContent='▶';}applyT(T);TL_EL.value=T*1000;}
+  // update pieces (opacity easing toward target; Tc uses timeline opacity override during drop)
+  for(const p of allPieces){
+    p.opacity+=(p.target-p.opacity)*Math.min(1,dt*5.5);
+    let fo=p.opacity;
+    let meshVisible=true;
+    if(g.coloringOn&&p.toroid){fo=0;meshVisible=false;} // hide fills (no depth write) -> no z-fight with overlay; keep edges
+    if(p===tcTube&&p._tlOpacity!=null){fo=Math.min(fo,p._tlOpacity);}
+    p.mat.opacity=fo;p.lmat.opacity=p.opacity*0.6;
+    p.mesh.visible=meshVisible&&p.opacity>0.01;
+    p.group.visible=p.opacity>0.01;
+    const bz=p.baseZ||0;
+    if(p.detach){const d=(1-p.opacity)*0.7;p.group.position.set(p.detach[0]*d,p.detach[1]*d,p.detach[2]*d+bz);}
+    else p.group.position.set(0,0,bz);
+  }
+  // colored overlay fade
+  coloredOpacity+=((g.coloringOn?1:0)-coloredOpacity)*Math.min(1,dt*5);
+  if(coloredMesh){coloredMesh.material.opacity=coloredOpacity;coloredMesh.visible=coloredOpacity>0.01;}
+  // spin about assembly axis (Z) once complete
+  if(T>=TL.done)spinAngle+=spinSpeed*dt; else spinAngle=0;
+  spinGroup.rotation.z=spinAngle;
+  controls.update();
+  renderer.render(scene,camera);
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
